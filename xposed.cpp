@@ -174,10 +174,10 @@ static void xposedCallHandler(const u4* args, JValue* pResult, const Method* met
     JNIEnv* env = self->jniEnv;
     
     // get java.lang.reflect.Method object for original method
-    jobject originalReflected = env->ToReflectedMethod(
-        (jclass)xposedAddLocalReference(self, original->clazz),
-        (jmethodID)method,
-        true);
+//    jobject originalReflected = env->ToReflectedMethod(
+//        (jclass)xposedAddLocalReference(self, original->clazz),
+//        (jmethodID)method,
+//        true);
   
     // convert/box arguments
     const char* desc = &method->shorty[1]; // [0] is the return type.
@@ -231,7 +231,7 @@ static void xposedCallHandler(const u4* args, JValue* pResult, const Method* met
     
     // call the Java handler function
     jobject resultRef = env->CallStaticObjectMethod(
-        xposedClass, xposedHandleHookedMethod, originalReflected, thisObject, argsArray);
+        xposedClass, xposedHandleHookedMethod, (jint)method, thisObject, argsArray);
         
     // exceptions are thrown to the caller
     if (env->ExceptionCheck()) {
@@ -339,7 +339,7 @@ static jboolean de_robv_android_xposed_XposedBridge_initNative(JNIEnv* env, jcla
     }
 
     xposedHandleHookedMethod = env->GetStaticMethodID(xposedClass, "handleHookedMethod",
-        "(Ljava/lang/reflect/Member;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
+        "(ILjava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
     if (xposedHandleHookedMethod == NULL) {
         ALOGE("ERROR: could not find method %s.handleHookedMethod(Method, Object, Object[])\n", XPOSED_CLASS);
         dvmLogExceptionStackTrace();
@@ -415,12 +415,18 @@ static void de_robv_android_xposed_XposedBridge_hookMethodNative(JNIEnv* env, jc
     #endif
 }
 
+static jint de_robv_android_xposed_XposedBridge_getMethodId(JNIEnv* env, jclass clazz, jobject reflectedMethod) {
+   return (jint)env->FromReflectedMethod(reflectedMethod);
+}
+
+
 // simplified copy of Method.invokeNative, but calls the original (non-hooked) method and has no access checks
 // used when a method has been hooked
 static jobject de_robv_android_xposed_XposedBridge_invokeOriginalMethodNative(JNIEnv* env, jclass clazz, jobject reflectedMethod,
             jobjectArray params1, jclass returnType1, jobject thisObject1, jobjectArray args1) {
     // try to find the original method
     Method* method = (Method*)env->FromReflectedMethod(reflectedMethod);
+    //Method* method = (Method*)methodId;
     XposedOriginalMethodsIt original = findXposedOriginalMethod(method);
     if (original != xposedOriginalMethods.end()) {
         method = &(*original);
@@ -514,6 +520,7 @@ static jobject de_robv_android_xposed_XposedBridge_getStartClassName(JNIEnv* env
 static const JNINativeMethod xposedMethods[] = {
     {"initNative", "()Z", (void*)de_robv_android_xposed_XposedBridge_initNative},
     {"hookMethodNative", "(Ljava/lang/Class;I)V", (void*)de_robv_android_xposed_XposedBridge_hookMethodNative},
+    {"getMethodId", "(Ljava/lang/reflect/Member;)I", (void*)de_robv_android_xposed_XposedBridge_getMethodId},
     {"invokeOriginalMethodNative", "(Ljava/lang/reflect/Member;[Ljava/lang/Class;Ljava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", (void*)de_robv_android_xposed_XposedBridge_invokeOriginalMethodNative},
     {"getStartClassName", "()Ljava/lang/String;", (void*)de_robv_android_xposed_XposedBridge_getStartClassName},
 };
