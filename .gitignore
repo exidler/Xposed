@@ -1,3 +1,5 @@
 *~
 app_process_xposed_*
+xposedtest_*
 xposed.sh
+build-Xposed
