@@ -20,10 +20,10 @@
 #include <stdio.h>
 #include <sys/mman.h>
 #include <cutils/properties.h>
+#include <dlfcn.h>
 
-#ifdef WITH_JIT
-#include <interp/Jit.h>
-#endif
+#include "xposed_offsets.h"
+
 
 namespace android {
 
@@ -36,8 +36,11 @@ jmethodID xposedHandleHookedMethod = NULL;
 jclass xresourcesClass = NULL;
 jmethodID xresourcesTranslateResId = NULL;
 jmethodID xresourcesTranslateAttrId = NULL;
-std::list<Method> xposedOriginalMethods;
+std::list<MethodXposedExt> xposedOriginalMethods;
 const char* startClassName = NULL;
+void* PTR_gDvmJit = NULL;
+
+
 
 
 ////////////////////////////////////////////////////////////
@@ -134,13 +137,25 @@ bool xposedOnVmCreated(JNIEnv* env, const char* className) {
         return false;
         
     startClassName = className;
-        
+
+    xposedInitMemberOffsets();
+
     // disable some access checks
     patchReturnTrue((void*) &dvmCheckClassAccess);
     patchReturnTrue((void*) &dvmCheckFieldAccess);
     patchReturnTrue((void*) &dvmInSamePackage);
-    if (access(XPOSED_DIR "do_not_hook_dvmCheckMethodAccess", F_OK) != 0)
+    if (access(XPOSED_DIR "conf/do_not_hook_dvmCheckMethodAccess", F_OK) != 0)
         patchReturnTrue((void*) &dvmCheckMethodAccess);
+
+    jclass miuiResourcesClass = env->FindClass(MIUI_RESOURCES_CLASS);
+    if (miuiResourcesClass != NULL) {
+        ClassObject* clazz = (ClassObject*)dvmDecodeIndirectRef(dvmThreadSelf(), miuiResourcesClass);
+        if (dvmIsFinalClass(clazz)) {
+            ALOGD("Removing final flag for class '%s'", MIUI_RESOURCES_CLASS);
+            clazz->accessFlags &= ~ACC_FINAL;
+        }
+    }
+    env->ExceptionClear();
 
     xposedClass = env->FindClass(XPOSED_CLASS);
     xposedClass = reinterpret_cast<jclass>(env->NewGlobalRef(xposedClass));
@@ -159,6 +174,23 @@ bool xposedOnVmCreated(JNIEnv* env, const char* className) {
 }
 
 
+static void xposedInitMemberOffsets() {
+    PTR_gDvmJit = dlsym(RTLD_DEFAULT, "gDvmJit");
+
+    if (PTR_gDvmJit == NULL) {
+        offsetMode = MEMBER_OFFSET_MODE_NO_JIT;
+    } else {
+        offsetMode = MEMBER_OFFSET_MODE_WITH_JIT;
+    }
+    ALOGD("Using structure member offsets for mode %s", xposedOffsetModesDesc[offsetMode]);
+
+    MEMBER_OFFSET_COPY(Thread, jniLocalRefTable);
+    MEMBER_OFFSET_COPY(Thread, status);
+    MEMBER_OFFSET_COPY(Thread, jniEnv);
+    MEMBER_OFFSET_COPY(DvmJitGlobals, codeCacheFull);
+}
+
+
 ////////////////////////////////////////////////////////////
 // handling hooked methods / helpers
 ////////////////////////////////////////////////////////////
@@ -170,8 +202,8 @@ static void xposedCallHandler(const u4* args, JValue* pResult, const Method* met
         return;
     }
     
-    ThreadStatus oldThreadStatus = self->status;
-    JNIEnv* env = self->jniEnv;
+    ThreadStatus oldThreadStatus = MEMBER_VAL(self, Thread, status);
+    JNIEnv* env = MEMBER_VAL(self, Thread, jniEnv);
     
     // get java.lang.reflect.Method object for original method
 //    jobject originalReflected = env->ToReflectedMethod(
@@ -266,9 +298,8 @@ static XposedOriginalMethodsIt findXposedOriginalMethod(const Method* method) {
 
     XposedOriginalMethodsIt it;
     for (XposedOriginalMethodsIt it = xposedOriginalMethods.begin() ; it != xposedOriginalMethods.end(); it++ ) {
-        if (strcmp(it->name, method->name) == 0
-         && strcmp(it->clazz->descriptor, method->clazz->descriptor) == 0
-         && dexProtoCompare(&it->prototype, &method->prototype) == 0) {
+        if (strcmp(it->clazz->descriptor, method->clazz->descriptor) == 0
+         && dvmCompareMethodNamesAndProtos(&(*it), method) == 0) {
             return it;
         }
     }
@@ -284,7 +315,7 @@ static jobject xposedAddLocalReference(::Thread* self, Object* obj) {
         return NULL;
     }
 
-    IndirectRefTable* pRefTable = &self->jniLocalRefTable;
+    IndirectRefTable* pRefTable = MEMBER_PTR(self, Thread, jniLocalRefTable);
     void* curFrame = self->interpSave.curFrame;
     u4 cookie = SAVEAREA_FROM_FP(curFrame)->xtra.localRefCookie;
     jobject jobj = (jobject) pRefTable->add(cookie, obj);
@@ -301,7 +332,7 @@ static jobject xposedAddLocalReference(::Thread* self, Object* obj) {
     return jobj;
 }
 
-static void replaceAsm(void* function, char* newCode, int len) {
+static void replaceAsm(void* function, unsigned const char* newCode, int len) {
 #ifdef __arm__
     function = (void*)((int)function & ~1);
 #endif
@@ -314,14 +345,14 @@ static void replaceAsm(void* function, char* newCode, int len) {
 
 static void patchReturnTrue(void* function) {
 #ifdef __arm__
-    char asmReturnTrueThumb[] = { 0x01, 0x20, 0x70, 0x47 };
-    char asmReturnTrueArm[] = { 0x01, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1 };
+    unsigned const char asmReturnTrueThumb[] = { 0x01, 0x20, 0x70, 0x47 };
+    unsigned const char asmReturnTrueArm[] = { 0x01, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1 };
     if ((int)function & 1)
         replaceAsm(function, asmReturnTrueThumb, sizeof(asmReturnTrueThumb));
     else
         replaceAsm(function, asmReturnTrueArm, sizeof(asmReturnTrueArm));
 #else
-    char asmReturnTrueX86[] = { 0x31, 0xC0, 0x40, 0xC3 };
+    unsigned const char asmReturnTrueX86[] = { 0x31, 0xC0, 0x40, 0xC3 };
     replaceAsm(function, asmReturnTrueX86, sizeof(asmReturnTrueX86));
 #endif
 }
@@ -402,17 +433,18 @@ static void de_robv_android_xposed_XposedBridge_hookMethodNative(JNIEnv* env, jc
     }
     
     // Save a copy of the original method
-    xposedOriginalMethods.push_front(*method);
+    xposedOriginalMethods.push_front(*((MethodXposedExt*)method));
 
     // Replace method with our own code
     SET_METHOD_FLAG(method, ACC_NATIVE);
     method->nativeFunc = &xposedCallHandler;
     method->registersSize = method->insSize;
     method->outsSize = 0;
-    #ifdef WITH_JIT
-    // reset JIT cache
-    gDvmJit.codeCacheFull = true;
-    #endif
+
+    if (PTR_gDvmJit != NULL) {
+        // reset JIT cache
+        MEMBER_VAL(PTR_gDvmJit, DvmJitGlobals, codeCacheFull) = true;
+    }
 }
 
 static jint de_robv_android_xposed_XposedBridge_getMethodId(JNIEnv* env, jclass clazz, jobject reflectedMethod) {
